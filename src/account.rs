@@ -882,10 +882,10 @@ mod test {
     use std::io::Read;
     use std::path::PathBuf;
 
-    use bitcoin::hashes::hex::FromHex;
     use bitcoin::blockdata::opcodes::all;
     use bitcoin::blockdata::script::Builder;
     use bitcoin::blockdata::transaction::{OutPoint, TxIn, TxOut};
+    use bitcoin::hashes::hex::FromHex;
     use bitcoin::network::constants::Network;
     use bitcoin::util::bip32::ChildNumber;
     use rand::Rng;
@@ -905,6 +905,104 @@ mod test {
             Seed::decrypt(seed.encrypt("whatever").unwrap().as_slice(), "whatever").unwrap(),
             seed
         );
+    }
+
+    use std::str::FromStr;
+    #[test]
+    /// Need detailed information of tx
+    fn test_sign_from_info() {
+        let input_txid = bitcoin::Txid::from_hex(
+            "763d9f04914559e74a4651332e512efb8f21a66e53ea4de392c59c61d6127171",
+        )
+        .unwrap();
+        let pub_key_bytes =
+            Vec::from_hex("03c0b70b6a5edfede2bc132267fd87516ac0b43234c4e4a5aa451efcdc2b5a6498")
+                .unwrap();
+        let pub_key = bitcoin::util::key::PublicKey::from_slice(&pub_key_bytes).unwrap();
+        let pk =
+            PrivateKey::from_wif("cPd7wFwP1WQgeLXNuvrVs3DDejfnZJuYus1nJiyHb5WH7rvD1dTj").unwrap();
+        let my_addr = Address::p2pkh(&pub_key, Network::Testnet);
+        // assert_eq!(my_addr.to_string(), "n4hLR9z9epBEUemysyQ9zfwJ92NdaBYgEg");
+        // assert_eq!(
+        //     my_addr.script_pubkey(),
+        //     Script::from_str("76a914fe4184fff3a08c8fc95437d7c841e9da5989734788ac").unwrap()
+        // );
+
+        let target = Address::from_str("musfRLG4MdRuXcpPZhWYx7FJM9uUuwerEX").unwrap();
+        // assert_eq!(
+        //     target.script_pubkey(),
+        //     Script::from_str("76a9149d7c68f8b8b8ebd842f65b0e0548cc2b76d9253788ac").unwrap()
+        // );
+
+        let expected_sighash = Script::from_str("483045022100e4c64740eb756c6b531d8f22df66cd2064b1ccff54d808bd1e6ff2535d400882022076bab32fa7fb306dcdb38db7045de6bd02ab47f4ac537733aeb2f1cc61c017d9012103c0b70b6a5edfede2bc132267fd87516ac0b43234c4e4a5aa451efcdc2b5a6498").unwrap();
+
+        let mut spending_transaction = Transaction {
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: input_txid,
+                    vout: 0,
+                },
+                sequence: RBF,
+                witness: Vec::new(),
+                script_sig: Script::new(),
+            }],
+            output: vec![TxOut {
+                script_pubkey: target.script_pubkey(),
+                value: 9000,
+            }],
+            lock_time: 0,
+            version: 1,
+        };
+        let sighash = spending_transaction.signature_hash(
+            0,
+            &my_addr.script_pubkey(),
+            SigHashType::All.as_u32(),
+        );
+        let context = Arc::new(SecpContext::new());
+        let signature = context.sign(&sighash[..], &pk).unwrap().serialize_der();
+        let mut with_hashtype = signature.to_vec();
+        with_hashtype.push(SigHashType::All.as_u32() as u8);
+        spending_transaction.input[0].script_sig = Builder::new()
+            .push_slice(with_hashtype.as_slice())
+            .push_slice(pub_key.to_bytes().as_slice())
+            .into_script();
+        spending_transaction.input[0].witness.clear();
+
+        assert_eq!(spending_transaction.input[0].script_sig, expected_sighash);
+
+        let tx_bytes = Vec::from_hex("0100000001717112d6619cc592e34dea536ea6218ffb2e512e3351464ae7594591049f3d76000000006b483045022100e4c64740eb756c6b531d8f22df66cd2064b1ccff54d808bd1e6ff2535d400882022076bab32fa7fb306dcdb38db7045de6bd02ab47f4ac537733aeb2f1cc61c017d9012103c0b70b6a5edfede2bc132267fd87516ac0b43234c4e4a5aa451efcdc2b5a6498fdffffff0128230000000000001976a9149d7c68f8b8b8ebd842f65b0e0548cc2b76d9253788ac00000000").unwrap();
+        let expected_signed_tx: Transaction = bitcoin::consensus::deserialize(&tx_bytes).unwrap();
+        assert_eq!(spending_transaction, expected_signed_tx);
+    }
+
+    #[test]
+    /// Only needs the tx bytes and sender information
+    fn test_sign_from_tx() {
+        let my_addr = Address::from_str("n4hLR9z9epBEUemysyQ9zfwJ92NdaBYgEg").unwrap();
+        let pub_key_bytes =
+            Vec::from_hex("03c0b70b6a5edfede2bc132267fd87516ac0b43234c4e4a5aa451efcdc2b5a6498")
+                .unwrap();
+        let pub_key = bitcoin::util::key::PublicKey::from_slice(&pub_key_bytes).unwrap();
+        let pk =
+            PrivateKey::from_wif("cPd7wFwP1WQgeLXNuvrVs3DDejfnZJuYus1nJiyHb5WH7rvD1dTj").unwrap();
+        let raw_tx_bytes = Vec::from_hex("0100000001717112d6619cc592e34dea536ea6218ffb2e512e3351464ae7594591049f3d76000000001976a914fe4184fff3a08c8fc95437d7c841e9da5989734788acfdffffff0128230000000000001976a9149d7c68f8b8b8ebd842f65b0e0548cc2b76d9253788ac00000000").unwrap();
+        let mut raw_tx: Transaction = bitcoin::consensus::deserialize(&raw_tx_bytes).unwrap();
+
+        let sighash = raw_tx.signature_hash(0, &my_addr.script_pubkey(), SigHashType::All.as_u32());
+        let context = Arc::new(SecpContext::new());
+        let signature = context.sign(&sighash[..], &pk).unwrap().serialize_der();
+        let mut with_hashtype = signature.to_vec();
+        with_hashtype.push(SigHashType::All.as_u32() as u8);
+
+        raw_tx.input[0].script_sig = Builder::new()
+            .push_slice(with_hashtype.as_slice())
+            .push_slice(pub_key.to_bytes().as_slice())
+            .into_script();
+        raw_tx.input[0].witness.clear();
+
+        let tx_bytes = Vec::from_hex("0100000001717112d6619cc592e34dea536ea6218ffb2e512e3351464ae7594591049f3d76000000006b483045022100e4c64740eb756c6b531d8f22df66cd2064b1ccff54d808bd1e6ff2535d400882022076bab32fa7fb306dcdb38db7045de6bd02ab47f4ac537733aeb2f1cc61c017d9012103c0b70b6a5edfede2bc132267fd87516ac0b43234c4e4a5aa451efcdc2b5a6498fdffffff0128230000000000001976a9149d7c68f8b8b8ebd842f65b0e0548cc2b76d9253788ac00000000").unwrap();
+        let expected_signed_tx: Transaction = bitcoin::consensus::deserialize(&tx_bytes).unwrap();
+        assert_eq!(raw_tx, expected_signed_tx);
     }
 
     #[test]
